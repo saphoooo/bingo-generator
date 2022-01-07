@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"net/http"
@@ -9,12 +10,20 @@ import (
 	"time"
 
 	"github.com/gomodule/redigo/redis"
-	"github.com/gorilla/mux"
 	"github.com/rs/zerolog/log"
+	redigotrace "gopkg.in/DataDog/dd-trace-go.v1/contrib/gomodule/redigo"
+	muxtrace "gopkg.in/DataDog/dd-trace-go.v1/contrib/gorilla/mux"
+	"gopkg.in/DataDog/dd-trace-go.v1/ddtrace/tracer"
 )
 
 func main() {
-	r := mux.NewRouter()
+	tracer.Start(
+		tracer.WithEnv("prod"),
+		tracer.WithService("bingo-generator"),
+		tracer.WithServiceVersion("v1.0"),
+	)
+	defer tracer.Stop()
+	r := muxtrace.NewRouter(muxtrace.WithServiceName("bingo-generator"))
 	r.HandleFunc("/trigger", trigger).Methods("GET")
 	log.Print("Start listening on :8000...")
 	err := http.ListenAndServe(":8000", r)
@@ -28,12 +37,21 @@ func trigger(w http.ResponseWriter, r *http.Request) {
 		MaxIdle:     10,
 		IdleTimeout: 240 * time.Second,
 		Dial: func() (redis.Conn, error) {
-			return redis.Dial("tcp", "redis-master:6379")
+			return redigotrace.Dial("tcp", "redis-master:6379",
+				redigotrace.WithServiceName("redis"),
+			)
 		},
 	}
 
 	conn := pool.Get()
-	_, err := conn.Do("AUTH", os.Getenv("REDIS_PASSWORD"))
+	defer conn.Close()
+
+	root, ctx := tracer.StartSpanFromContext(context.Background(), "parent.request",
+		tracer.ServiceName("bingo-generator"),
+		tracer.ResourceName("redis"),
+	)
+	defer root.Finish()
+	_, err := conn.Do("AUTH", os.Getenv("REDIS_PASSWORD"), ctx)
 	if err != nil {
 		log.Error().
 			Str("hostname", r.Host).
@@ -48,9 +66,8 @@ func trigger(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "Oops something wrong happened...")
 		return
 	}
-	defer conn.Close()
 
-	exists, err := redis.Int(conn.Do("EXISTS", "bingoNumberOfTheDay"))
+	exists, err := redis.Int(conn.Do("EXISTS", "bingoNumberOfTheDay", ctx))
 	if err != nil {
 		log.Error().
 			Str("hostname", r.Host).
@@ -69,7 +86,7 @@ func trigger(w http.ResponseWriter, r *http.Request) {
 		// create a new key entry
 		rand.Seed(time.Now().UTC().UnixNano())
 		bingoNumberOfTheDay := rand.Intn(10) + 1
-		_, err = conn.Do("SET", "bingoNumberOfTheDay", bingoNumberOfTheDay)
+		_, err = conn.Do("SET", "bingoNumberOfTheDay", bingoNumberOfTheDay, ctx)
 		if err != nil {
 			log.Error().
 				Str("hostname", r.Host).
@@ -85,7 +102,7 @@ func trigger(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// set expiry of 1 day
-		_, err = conn.Do("EXPIRE", "bingoNumberOfTheDay", 86400)
+		_, err = conn.Do("EXPIRE", "bingoNumberOfTheDay", 86400, ctx)
 		if err != nil {
 			log.Error().
 				Str("hostname", r.Host).
