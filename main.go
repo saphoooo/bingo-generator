@@ -18,9 +18,9 @@ import (
 
 func main() {
 	tracer.Start(
-		tracer.WithEnv("prod"),
-		tracer.WithService("bingo-generator"),
-		tracer.WithServiceVersion("v1.0"),
+		tracer.WithGlobalTag("env", "prod"),
+		tracer.WithGlobalTag("service", "bingo-generator"),
+		tracer.WithGlobalTag("version", "v1.0"),
 	)
 	defer tracer.Stop()
 	r := muxtrace.NewRouter(muxtrace.WithServiceName("bingo-generator"))
@@ -33,6 +33,9 @@ func main() {
 }
 
 func trigger(w http.ResponseWriter, r *http.Request) {
+	span := tracer.StartSpan("bingo-generator.trigger.request", tracer.ResourceName("/"))
+	defer span.Finish()
+
 	pool := &redis.Pool{
 		MaxIdle:     10,
 		IdleTimeout: 240 * time.Second,
